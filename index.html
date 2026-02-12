@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cube Builder</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    canvas { display: block; }
+
+    #ui{
+      position:fixed; top:12px; left:12px;
+      background:rgba(255,255,255,.92);
+      padding:12px 12px; border-radius:14px;
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      font-size:14px; line-height:1.35;
+      box-shadow:0 6px 18px rgba(0,0,0,.15);
+      max-width:380px; user-select:none;
+    }
+    .hint{ opacity:.85; font-size:12px; margin-top:6px; }
+    .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+
+    /* Botones grandes (SIEI-friendly) */
+    .mode-btn{
+      padding:10px 14px;
+      border-radius:14px;
+      border:2px solid #ddd;
+      background:#fff;
+      cursor:pointer;
+      font-weight:700;
+      letter-spacing:.2px;
+      min-width:110px;
+    }
+    .mode-btn.active{
+      border-color:#111;
+      box-shadow:0 2px 10px rgba(0,0,0,.12);
+    }
+
+    button, input[type="color"]{
+      padding:8px 12px; border-radius:12px;
+      border:1px solid #ddd; background:#fff; cursor:pointer;
+      font-weight:600;
+    }
+    button:hover{ background:#f6f6f6; }
+    input[type="color"]{ height:42px; width:54px; padding:0; border-radius:12px; }
+  </style>
+
+  <!-- Import map: arregla el "from 'three'" interno de OrbitControls -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="ui">
+    <div><b>Constructor de cubs</b></div>
+
+    <div class="row">
+      <button id="btnPlace" class="mode-btn active">🟦 AFEGIR</button>
+      <button id="btnErase" class="mode-btn">🧽 BORRAR</button>
+    </div>
+
+    <div id="modeHint" class="hint">ARA: <b>AFEGIR</b></div>
+
+    <div class="row">
+      <label style="font-weight:700;">Color</label>
+      <input id="color" type="color" value="#4da3ff" />
+      <button id="clear">Borrar todo</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+
+    // --- Escena ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf3f5f7);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 400);
+    camera.position.set(10, 12, 14);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    // Controles
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = true;
+    controls.target.set(0, 0, 0);
+    controls.update();
+
+    // Luces
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(10, 20, 10);
+    scene.add(dir);
+
+    // Grid + suelo invisible (raycast)
+    const GRID_SIZE = 20;
+    scene.add(new THREE.GridHelper(GRID_SIZE, GRID_SIZE, 0x9aa4ad, 0xd0d6dc));
+
+    const groundGeo = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE);
+    groundGeo.rotateX(-Math.PI / 2);
+    const ground = new THREE.Mesh(
+      groundGeo,
+      new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.0 })
+    );
+    ground.name = "GROUND";
+    scene.add(ground);
+
+    // Cubos
+    const cubeGeo = new THREE.BoxGeometry(1,1,1);
+    const cubes = new Map(); // key -> mesh
+    const keyOf = (x,y,z) => `${x},${y},${z}`;
+
+    // --- OUTLINE GLOBAL (solo contorno exterior del conjunto) ---
+    let outline = null; // THREE.LineSegments
+    let outlineGeo = null;
+    let outlineMat = null;
+
+    function hasCube(x,y,z){
+      return cubes.has(keyOf(x,y,z));
+    }
+
+    function faceExposed(x,y,z, dx,dy,dz){
+      return !hasCube(x+dx, y+dy, z+dz);
+    }
+
+    // Dedup de segmentos (no repetimos aristas compartidas entre dos caras exteriores)
+    function addSeg(set, ax,ay,az, bx,by,bz){
+      const A = `${ax},${ay},${az}`;
+      const B = `${bx},${by},${bz}`;
+      const key = (A < B) ? `${A}|${B}` : `${B}|${A}`;
+      set.add(key);
+    }
+
+    function rebuildOutline(){
+      // Recolecta aristas exteriores como segmentos únicos
+      const segs = new Set();
+
+      for (const m of cubes.values()){
+        const {x,y,z} = m.userData;
+
+        const x0=x,   x1=x+1;
+        const y0=y,   y1=y+1;
+        const z0=z,   z1=z+1;
+
+        // Cara +X
+        if (faceExposed(x,y,z, +1,0,0)){
+          addSeg(segs, x1,y0,z0, x1,y1,z0);
+          addSeg(segs, x1,y0,z1, x1,y1,z1);
+          addSeg(segs, x1,y0,z0, x1,y0,z1);
+          addSeg(segs, x1,y1,z0, x1,y1,z1);
+        }
+        // Cara -X
+        if (faceExposed(x,y,z, -1,0,0)){
+          addSeg(segs, x0,y0,z0, x0,y1,z0);
+          addSeg(segs, x0,y0,z1, x0,y1,z1);
+          addSeg(segs, x0,y0,z0, x0,y0,z1);
+          addSeg(segs, x0,y1,z0, x0,y1,z1);
+        }
+        // Cara +Y (arriba)
+        if (faceExposed(x,y,z, 0,+1,0)){
+          addSeg(segs, x0,y1,z0, x1,y1,z0);
+          addSeg(segs, x0,y1,z1, x1,y1,z1);
+          addSeg(segs, x0,y1,z0, x0,y1,z1);
+          addSeg(segs, x1,y1,z0, x1,y1,z1);
+        }
+        // Cara -Y (abajo)
+        if (faceExposed(x,y,z, 0,-1,0)){
+          addSeg(segs, x0,y0,z0, x1,y0,z0);
+          addSeg(segs, x0,y0,z1, x1,y0,z1);
+          addSeg(segs, x0,y0,z0, x0,y0,z1);
+          addSeg(segs, x1,y0,z0, x1,y0,z1);
+        }
+        // Cara +Z
+        if (faceExposed(x,y,z, 0,0,+1)){
+          addSeg(segs, x0,y0,z1, x1,y0,z1);
+          addSeg(segs, x0,y1,z1, x1,y1,z1);
+          addSeg(segs, x0,y0,z1, x0,y1,z1);
+          addSeg(segs, x1,y0,z1, x1,y1,z1);
+        }
+        // Cara -Z
+        if (faceExposed(x,y,z, 0,0,-1)){
+          addSeg(segs, x0,y0,z0, x1,y0,z0);
+          addSeg(segs, x0,y1,z0, x1,y1,z0);
+          addSeg(segs, x0,y0,z0, x0,y1,z0);
+          addSeg(segs, x1,y0,z0, x1,y1,z0);
+        }
+      }
+
+      // Construye el buffer de líneas
+      const positions = new Float32Array(segs.size * 2 * 3);
+      let i = 0;
+      for (const key of segs){
+        const [a,b] = key.split("|");
+        const [ax,ay,az] = a.split(",").map(Number);
+        const [bx,by,bz] = b.split(",").map(Number);
+
+        positions[i++] = ax; positions[i++] = ay; positions[i++] = az;
+        positions[i++] = bx; positions[i++] = by; positions[i++] = bz;
+      }
+
+      // Limpia outline anterior
+      if (outline){
+        scene.remove(outline);
+        if (outlineGeo) outlineGeo.dispose();
+        // outlineMat lo reutilizamos (no hace falta recrearlo cada vez)
+      }
+
+      outlineGeo = new THREE.BufferGeometry();
+      outlineGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+      if (!outlineMat){
+        outlineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.8 });
+      }
+
+      outline = new THREE.LineSegments(outlineGeo, outlineMat);
+      outline.renderOrder = 10; // por encima de los cubos
+      scene.add(outline);
+    }
+
+    function addCube(x, y, z, colorHex){
+      const k = keyOf(x,y,z);
+      if (cubes.has(k)) return;
+
+      const mat = new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.7 });
+      const m = new THREE.Mesh(cubeGeo, mat);
+      m.position.set(x+0.5, y+0.5, z+0.5);
+      m.userData = { x,y,z };
+
+      scene.add(m);
+      cubes.set(k, m);
+
+      rebuildOutline(); // ✅ actualiza contorno exterior
+    }
+
+    function removeCube(x,y,z){
+      const k = keyOf(x,y,z);
+      const m = cubes.get(k);
+      if (!m) return;
+
+      scene.remove(m);
+      // OJO: cubeGeo es compartida, NO dispose geometry aquí
+      m.material.dispose();
+      cubes.delete(k);
+
+      rebuildOutline(); // ✅ actualiza contorno exterior
+    }
+
+    function clearAll(){
+      for (const m of cubes.values()){
+        scene.remove(m);
+        m.material.dispose();
+      }
+      cubes.clear();
+      rebuildOutline();
+    }
+    document.getElementById("clear").addEventListener("click", clearAll);
+
+    // --- Modo PONER / BORRAR ---
+    let mode = "place"; // "place" | "erase"
+    const btnPlace = document.getElementById("btnPlace");
+    const btnErase = document.getElementById("btnErase");
+    const modeHint = document.getElementById("modeHint");
+
+    function setMode(next){
+      mode = next;
+      btnPlace.classList.toggle("active", mode === "place");
+      btnErase.classList.toggle("active", mode === "erase");
+      modeHint.innerHTML = mode === "place"
+        ? 'ARA: <b>AFEGIR</b>'
+        : 'ARA: <b>BORRAR</b>';
+    }
+
+    btnPlace.addEventListener("click", () => setMode("place"));
+    btnErase.addEventListener("click", () => setMode("erase"));
+
+    // Raycaster
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function withinGrid(x,z){
+      const half = GRID_SIZE/2;
+      return (x >= -half && x < half && z >= -half && z < half);
+    }
+
+    // --- Evitar cubo fantasma al mover cámara ---
+    let downX = 0, downY = 0;
+    let moved = false;
+    let activeButton = -1;
+    const MOVE_TOLERANCE = 6; // px
+
+    renderer.domElement.addEventListener("pointerdown", (ev) => {
+      // si clicas en la UI, no construyas
+      if (ev.target && ev.target.closest && ev.target.closest("#ui")) return;
+
+      activeButton = ev.button; // 0 izq / 2 der
+      downX = ev.clientX;
+      downY = ev.clientY;
+      moved = false;
+    });
+
+    renderer.domElement.addEventListener("pointermove", (ev) => {
+      if (activeButton === -1) return;
+      const dx = Math.abs(ev.clientX - downX);
+      const dy = Math.abs(ev.clientY - downY);
+      if (dx > MOVE_TOLERANCE || dy > MOVE_TOLERANCE) moved = true;
+    });
+
+    renderer.domElement.addEventListener("pointerup", (ev) => {
+      // Solo botón izquierdo para acciones
+      if (activeButton !== 0) { activeButton = -1; return; }
+
+      // Si fue arrastre, era cámara → no acción
+      if (moved) { activeButton = -1; return; }
+
+      // Click limpio
+      mouse.x = (ev.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(ev.clientY / innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+
+      // IMPORTANTE: no raycastear contra outline (solo cubos + suelo)
+      const hits = raycaster.intersectObjects([ground, ...cubes.values()], false);
+      if (!hits.length) { activeButton = -1; return; }
+
+      const hit = hits[0];
+
+      // --- MODO BORRAR ---
+      if (mode === "erase") {
+        if (hit.object !== ground) {
+          const { x, y, z } = hit.object.userData;
+          removeCube(x, y, z);
+        }
+        activeButton = -1;
+        return;
+      }
+
+      // --- MODO PONER ---
+      const colorHex = parseInt(document.getElementById("color").value.replace("#","0x"));
+
+      // Click en suelo: cubo en y=0
+      if (hit.object === ground) {
+        const p = hit.point;
+        const x = Math.floor(p.x);
+        const z = Math.floor(p.z);
+        if (!withinGrid(x, z)) { activeButton = -1; return; }
+        addCube(x, 0, z, colorHex);
+        activeButton = -1;
+        return;
+      }
+
+      // Click en cara del cubo: añade pegado a esa cara
+      const obj = hit.object;
+      const { x, y, z } = obj.userData;
+
+      const n = hit.face.normal.clone().applyQuaternion(obj.quaternion);
+      const step = new THREE.Vector3(Math.round(n.x), Math.round(n.y), Math.round(n.z));
+
+      const nx = x + step.x;
+      const ny = y + step.y;
+      const nz = z + step.z;
+
+      if (ny < 0 || ny > 40) { activeButton = -1; return; }
+      if (!withinGrid(nx, nz)) { activeButton = -1; return; }
+
+      addCube(nx, ny, nz, colorHex);
+      activeButton = -1;
+    });
+
+    // si sueltas el botón fuera del canvas
+    window.addEventListener("pointerup", () => { activeButton = -1; });
+
+    // Render loop
+    function animate(){
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // Cubo inicial
+    addCube(0,0,0, 0x4da3ff);
+  </script>
+</body>
+</html>
