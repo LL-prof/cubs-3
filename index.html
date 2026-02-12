@@ -20,7 +20,6 @@
     .hint{ opacity:.85; font-size:12px; margin-top:6px; }
     .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
 
-    /* Botones grandes (SIEI-friendly) */
     .mode-btn{
       padding:10px 14px;
       border-radius:14px;
@@ -45,7 +44,6 @@
     input[type="color"]{ height:42px; width:54px; padding:0; border-radius:12px; }
   </style>
 
-  <!-- Import map: arregla el "from 'three'" interno de OrbitControls -->
   <script type="importmap">
   {
     "imports": {
@@ -120,30 +118,37 @@
     const cubes = new Map(); // key -> mesh
     const keyOf = (x,y,z) => `${x},${y},${z}`;
 
-    // --- OUTLINE GLOBAL (solo contorno exterior del conjunto) ---
-    let outline = null; // THREE.LineSegments
-    let outlineGeo = null;
-    let outlineMat = null;
-
     function hasCube(x,y,z){
       return cubes.has(keyOf(x,y,z));
     }
-
     function faceExposed(x,y,z, dx,dy,dz){
       return !hasCube(x+dx, y+dy, z+dz);
     }
 
-    // Dedup de segmentos (no repetimos aristas compartidas entre dos caras exteriores)
-    function addSeg(set, ax,ay,az, bx,by,bz){
+    // --- OUTLINE GLOBAL (solo contorno exterior real) ---
+    let outline = null;
+    let outlineGeo = null;
+    let outlineMat = null;
+
+    function edgeKey(ax,ay,az, bx,by,bz){
       const A = `${ax},${ay},${az}`;
       const B = `${bx},${by},${bz}`;
-      const key = (A < B) ? `${A}|${B}` : `${B}|${A}`;
-      set.add(key);
+      return (A < B) ? `${A}|${B}` : `${B}|${A}`;
+    }
+
+    function addEdge(edgeMap, ax,ay,az, bx,by,bz, normalId){
+      const k = edgeKey(ax,ay,az, bx,by,bz);
+      let entry = edgeMap.get(k);
+      if (!entry){
+        entry = { count: 0, normals: new Set() };
+        edgeMap.set(k, entry);
+      }
+      entry.count += 1;
+      entry.normals.add(normalId);
     }
 
     function rebuildOutline(){
-      // Recolecta aristas exteriores como segmentos únicos
-      const segs = new Set();
+      const edgeMap = new Map();
 
       for (const m of cubes.values()){
         const {x,y,z} = m.userData;
@@ -152,55 +157,70 @@
         const y0=y,   y1=y+1;
         const z0=z,   z1=z+1;
 
-        // Cara +X
+        // +X
         if (faceExposed(x,y,z, +1,0,0)){
-          addSeg(segs, x1,y0,z0, x1,y1,z0);
-          addSeg(segs, x1,y0,z1, x1,y1,z1);
-          addSeg(segs, x1,y0,z0, x1,y0,z1);
-          addSeg(segs, x1,y1,z0, x1,y1,z1);
+          const n = "+X";
+          addEdge(edgeMap, x1,y0,z0, x1,y1,z0, n);
+          addEdge(edgeMap, x1,y0,z1, x1,y1,z1, n);
+          addEdge(edgeMap, x1,y0,z0, x1,y0,z1, n);
+          addEdge(edgeMap, x1,y1,z0, x1,y1,z1, n);
         }
-        // Cara -X
+        // -X
         if (faceExposed(x,y,z, -1,0,0)){
-          addSeg(segs, x0,y0,z0, x0,y1,z0);
-          addSeg(segs, x0,y0,z1, x0,y1,z1);
-          addSeg(segs, x0,y0,z0, x0,y0,z1);
-          addSeg(segs, x0,y1,z0, x0,y1,z1);
+          const n = "-X";
+          addEdge(edgeMap, x0,y0,z0, x0,y1,z0, n);
+          addEdge(edgeMap, x0,y0,z1, x0,y1,z1, n);
+          addEdge(edgeMap, x0,y0,z0, x0,y0,z1, n);
+          addEdge(edgeMap, x0,y1,z0, x0,y1,z1, n);
         }
-        // Cara +Y (arriba)
+        // +Y (top)
         if (faceExposed(x,y,z, 0,+1,0)){
-          addSeg(segs, x0,y1,z0, x1,y1,z0);
-          addSeg(segs, x0,y1,z1, x1,y1,z1);
-          addSeg(segs, x0,y1,z0, x0,y1,z1);
-          addSeg(segs, x1,y1,z0, x1,y1,z1);
+          const n = "+Y";
+          addEdge(edgeMap, x0,y1,z0, x1,y1,z0, n);
+          addEdge(edgeMap, x0,y1,z1, x1,y1,z1, n);
+          addEdge(edgeMap, x0,y1,z0, x0,y1,z1, n);
+          addEdge(edgeMap, x1,y1,z0, x1,y1,z1, n);
         }
-        // Cara -Y (abajo)
+        // -Y (bottom)
         if (faceExposed(x,y,z, 0,-1,0)){
-          addSeg(segs, x0,y0,z0, x1,y0,z0);
-          addSeg(segs, x0,y0,z1, x1,y0,z1);
-          addSeg(segs, x0,y0,z0, x0,y0,z1);
-          addSeg(segs, x1,y0,z0, x1,y0,z1);
+          const n = "-Y";
+          addEdge(edgeMap, x0,y0,z0, x1,y0,z0, n);
+          addEdge(edgeMap, x0,y0,z1, x1,y0,z1, n);
+          addEdge(edgeMap, x0,y0,z0, x0,y0,z1, n);
+          addEdge(edgeMap, x1,y0,z0, x1,y0,z1, n);
         }
-        // Cara +Z
+        // +Z
         if (faceExposed(x,y,z, 0,0,+1)){
-          addSeg(segs, x0,y0,z1, x1,y0,z1);
-          addSeg(segs, x0,y1,z1, x1,y1,z1);
-          addSeg(segs, x0,y0,z1, x0,y1,z1);
-          addSeg(segs, x1,y0,z1, x1,y1,z1);
+          const n = "+Z";
+          addEdge(edgeMap, x0,y0,z1, x1,y0,z1, n);
+          addEdge(edgeMap, x0,y1,z1, x1,y1,z1, n);
+          addEdge(edgeMap, x0,y0,z1, x0,y1,z1, n);
+          addEdge(edgeMap, x1,y0,z1, x1,y1,z1, n);
         }
-        // Cara -Z
+        // -Z
         if (faceExposed(x,y,z, 0,0,-1)){
-          addSeg(segs, x0,y0,z0, x1,y0,z0);
-          addSeg(segs, x0,y1,z0, x1,y1,z0);
-          addSeg(segs, x0,y0,z0, x0,y1,z0);
-          addSeg(segs, x1,y0,z0, x1,y1,z0);
+          const n = "-Z";
+          addEdge(edgeMap, x0,y0,z0, x1,y0,z0, n);
+          addEdge(edgeMap, x0,y1,z0, x1,y1,z0, n);
+          addEdge(edgeMap, x0,y0,z0, x0,y1,z0, n);
+          addEdge(edgeMap, x1,y0,z0, x1,y1,z0, n);
         }
       }
 
-      // Construye el buffer de líneas
-      const positions = new Float32Array(segs.size * 2 * 3);
+      // Nos quedamos solo con:
+      // - aristas que aparecen una vez (borde libre)
+      // - o aristas con normales distintas (esquina real)
+      const kept = [];
+      for (const [k, entry] of edgeMap.entries()){
+        if (entry.count === 1 || entry.normals.size > 1){
+          kept.push(k);
+        }
+      }
+
+      const positions = new Float32Array(kept.length * 2 * 3);
       let i = 0;
-      for (const key of segs){
-        const [a,b] = key.split("|");
+      for (const k of kept){
+        const [a,b] = k.split("|");
         const [ax,ay,az] = a.split(",").map(Number);
         const [bx,by,bz] = b.split(",").map(Number);
 
@@ -208,22 +228,20 @@
         positions[i++] = bx; positions[i++] = by; positions[i++] = bz;
       }
 
-      // Limpia outline anterior
       if (outline){
         scene.remove(outline);
         if (outlineGeo) outlineGeo.dispose();
-        // outlineMat lo reutilizamos (no hace falta recrearlo cada vez)
       }
 
       outlineGeo = new THREE.BufferGeometry();
       outlineGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
       if (!outlineMat){
-        outlineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.8 });
+        outlineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.85 });
       }
 
       outline = new THREE.LineSegments(outlineGeo, outlineMat);
-      outline.renderOrder = 10; // por encima de los cubos
+      outline.renderOrder = 10;
       scene.add(outline);
     }
 
@@ -234,12 +252,12 @@
       const mat = new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.7 });
       const m = new THREE.Mesh(cubeGeo, mat);
       m.position.set(x+0.5, y+0.5, z+0.5);
-      m.userData = { x,y,z };
+      m.userData = { x,y,z, colorHex };
 
       scene.add(m);
       cubes.set(k, m);
 
-      rebuildOutline(); // ✅ actualiza contorno exterior
+      rebuildOutline();
     }
 
     function removeCube(x,y,z){
@@ -248,11 +266,10 @@
       if (!m) return;
 
       scene.remove(m);
-      // OJO: cubeGeo es compartida, NO dispose geometry aquí
-      m.material.dispose();
+      m.material.dispose(); // NO dispose geometry (compartida)
       cubes.delete(k);
 
-      rebuildOutline(); // ✅ actualiza contorno exterior
+      rebuildOutline();
     }
 
     function clearAll(){
@@ -266,7 +283,7 @@
     document.getElementById("clear").addEventListener("click", clearAll);
 
     // --- Modo PONER / BORRAR ---
-    let mode = "place"; // "place" | "erase"
+    let mode = "place";
     const btnPlace = document.getElementById("btnPlace");
     const btnErase = document.getElementById("btnErase");
     const modeHint = document.getElementById("modeHint");
@@ -279,7 +296,6 @@
         ? 'ARA: <b>AFEGIR</b>'
         : 'ARA: <b>BORRAR</b>';
     }
-
     btnPlace.addEventListener("click", () => setMode("place"));
     btnErase.addEventListener("click", () => setMode("erase"));
 
@@ -296,13 +312,11 @@
     let downX = 0, downY = 0;
     let moved = false;
     let activeButton = -1;
-    const MOVE_TOLERANCE = 6; // px
+    const MOVE_TOLERANCE = 6;
 
     renderer.domElement.addEventListener("pointerdown", (ev) => {
-      // si clicas en la UI, no construyas
       if (ev.target && ev.target.closest && ev.target.closest("#ui")) return;
-
-      activeButton = ev.button; // 0 izq / 2 der
+      activeButton = ev.button;
       downX = ev.clientX;
       downY = ev.clientY;
       moved = false;
@@ -316,24 +330,19 @@
     });
 
     renderer.domElement.addEventListener("pointerup", (ev) => {
-      // Solo botón izquierdo para acciones
       if (activeButton !== 0) { activeButton = -1; return; }
-
-      // Si fue arrastre, era cámara → no acción
       if (moved) { activeButton = -1; return; }
 
-      // Click limpio
       mouse.x = (ev.clientX / innerWidth) * 2 - 1;
       mouse.y = -(ev.clientY / innerHeight) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
 
-      // IMPORTANTE: no raycastear contra outline (solo cubos + suelo)
       const hits = raycaster.intersectObjects([ground, ...cubes.values()], false);
       if (!hits.length) { activeButton = -1; return; }
 
       const hit = hits[0];
 
-      // --- MODO BORRAR ---
+      // BORRAR
       if (mode === "erase") {
         if (hit.object !== ground) {
           const { x, y, z } = hit.object.userData;
@@ -343,10 +352,9 @@
         return;
       }
 
-      // --- MODO PONER ---
+      // PONER
       const colorHex = parseInt(document.getElementById("color").value.replace("#","0x"));
 
-      // Click en suelo: cubo en y=0
       if (hit.object === ground) {
         const p = hit.point;
         const x = Math.floor(p.x);
@@ -357,7 +365,6 @@
         return;
       }
 
-      // Click en cara del cubo: añade pegado a esa cara
       const obj = hit.object;
       const { x, y, z } = obj.userData;
 
@@ -375,10 +382,8 @@
       activeButton = -1;
     });
 
-    // si sueltas el botón fuera del canvas
     window.addEventListener("pointerup", () => { activeButton = -1; });
 
-    // Render loop
     function animate(){
       requestAnimationFrame(animate);
       controls.update();
